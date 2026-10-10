@@ -3,6 +3,7 @@ package dst
 import (
 	"dst-management-platform-api/cache"
 	"dst-management-platform-api/database/models"
+	"dst-management-platform-api/internal/runner"
 	"dst-management-platform-api/logger"
 	"dst-management-platform-api/utils"
 	"fmt"
@@ -51,6 +52,7 @@ func (g *Game) initInfo() {
 	g.clusterTokenTxtPath = fmt.Sprintf("%s/cluster_token.txt", g.clusterPath)
 
 	// worlds
+	config := runner.DefaultConfig()
 	for _, world := range *g.worlds {
 		customGameStartupCmd := world.CustomStartupCmd
 		// 自定义启动命令会被拼接进 bash -c 执行，不合法时一律忽略，使用默认启动命令
@@ -66,7 +68,10 @@ func (g *Game) initInfo() {
 		modOverridesPath := fmt.Sprintf("%s/modoverrides.lua", worldPath)
 		screenName := fmt.Sprintf("DMP_%s_%s", g.clusterName, world.WorldName)
 
-		startCmd := g.generateGameStartCmd(screenName, customGameStartupCmd, world.WorldName)
+		startCmd, startCmdErr := g.generateGameStartCmd(screenName, customGameStartupCmd, world.WorldName, config)
+		if startCmdErr != nil {
+			logger.Logger.Errorf("生成世界启动命令失败, world: %s, err: %v", world.WorldName, startCmdErr)
+		}
 
 		g.worldSaveData = append(g.worldSaveData, worldSaveData{
 			worldPath:             worldPath,
@@ -76,6 +81,7 @@ func (g *Game) initInfo() {
 			levelDataOverridePath: levelDataOverridePath,
 			modOverridesPath:      modOverridesPath,
 			startCmd:              startCmd,
+			startCmdErr:           startCmdErr,
 			screenName:            screenName,
 			World:                 world,
 		})
@@ -100,27 +106,68 @@ func (g *Game) initInfo() {
 
 }
 
-func (g *Game) generateGameStartCmd(screenName, customGameStartupCmd, worldName string) string {
-	var startCmd string
-
-	// screenName和worldName来自数据库/存档，统一使用ShellQuote，避免被拼接进bash后解释执行
+func (g *Game) generateGameStartCmd(screenName, customGameStartupCmd, worldName string, config runner.Config) (string, error) {
+	// screenName来自数据库/存档，统一使用ShellQuote，避免被拼接进bash后解释执行
 	quotedScreenName := utils.ShellQuote(screenName)
-	quotedWorldName := utils.ShellQuote(worldName)
 
-	if cache.OsType == utils.Darwin {
-		startCmd = fmt.Sprintf("export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:%s/steamcmd && cd %s && screen -d -h 200 -m -S %s %s ./dontstarve_dedicated_server_nullrenderer -console -cluster %s -shard %s", cache.CurrentDir, utils.DarwinDstBinDir, quotedScreenName, customGameStartupCmd, g.clusterName, quotedWorldName)
+	// Build DST command spec with compatibility layer
+	var binDir string
+	var binary string
+	var targetArch runner.BinaryArch
+
+	if config.HostOS == utils.Darwin {
+		// Darwin: native execution
+		binDir = utils.DarwinDstBinDir
+		binary = "./dontstarve_dedicated_server_nullrenderer"
+		targetArch = runner.Native
 	} else {
+		// Linux: determine binary and architecture based on StartType
 		switch g.setting.StartType {
 		case "32-bit":
-			startCmd = fmt.Sprintf("cd dst/bin/ && screen -d -h 200 -m -S %s %s ./dontstarve_dedicated_server_nullrenderer -console -cluster %s -shard %s", quotedScreenName, customGameStartupCmd, g.clusterName, quotedWorldName)
+			binDir = "dst/bin/"
+			binary = "./dontstarve_dedicated_server_nullrenderer"
+			targetArch = runner.X8632
 		case "64-bit":
-			startCmd = fmt.Sprintf("cd dst/bin64/ && screen -d -h 200 -m -S %s %s ./dontstarve_dedicated_server_nullrenderer_x64 -console -cluster %s -shard %s", quotedScreenName, customGameStartupCmd, g.clusterName, quotedWorldName)
+			binDir = "dst/bin64/"
+			binary = "./dontstarve_dedicated_server_nullrenderer_x64"
+			targetArch = runner.X8664
 		case "luajit":
-			startCmd = fmt.Sprintf("cd dst/bin64/ && screen -d -h 200 -m -S %s %s ./dontstarve_dedicated_server_nullrenderer_x64_luajit -console -cluster %s -shard %s", quotedScreenName, customGameStartupCmd, g.clusterName, quotedWorldName)
+			binDir = "dst/bin64/"
+			binary = "./dontstarve_dedicated_server_nullrenderer_x64_luajit"
+			targetArch = runner.X8664
 		default:
-			startCmd = "exit 1"
+			return "", fmt.Errorf("unsupported StartType: %s", g.setting.StartType)
 		}
 	}
 
-	return startCmd
+	// Build DST arguments
+	args := []string{
+		"-console",
+		"-cluster",
+		g.clusterName,
+		"-shard",
+		worldName,
+	}
+
+	// Build compatibility command
+	spec, err := runner.BuildCompatCommand(binary, args, targetArch, config)
+	if err != nil {
+		return "", fmt.Errorf("failed to build compatibility command: %w", err)
+	}
+
+	// Render to shell command
+	dstCmd := runner.ShellRender(spec)
+
+	// Build full screen command
+	// customGameStartupCmd is a trusted/validated shell fragment retained for backward compatibility
+	var startCmd string
+	if config.HostOS == utils.Darwin {
+		startCmd = fmt.Sprintf("export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:%s/steamcmd && cd %s && screen -d -h 200 -m -S %s %s %s",
+			cache.CurrentDir, binDir, quotedScreenName, customGameStartupCmd, dstCmd)
+	} else {
+		startCmd = fmt.Sprintf("cd %s && screen -d -h 200 -m -S %s %s %s",
+			binDir, quotedScreenName, customGameStartupCmd, dstCmd)
+	}
+
+	return startCmd, nil
 }

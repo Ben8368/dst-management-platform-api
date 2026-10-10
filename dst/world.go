@@ -26,6 +26,7 @@ type worldSaveData struct {
 	levelDataOverridePath string
 	modOverridesPath      string
 	startCmd              string
+	startCmdErr           error
 	screenName            string
 	models.World
 }
@@ -240,6 +241,10 @@ func (g *Game) startWorld(id int) error {
 		return err
 	}
 
+	if world.startCmdErr != nil {
+		return world.startCmdErr
+	}
+
 	logger.Logger.Debug(world.startCmd)
 	if !utils.IsSafeString(world.WorldName) {
 		logger.Logger.Warnf("世界名 %s 可能存在注入风险", world.WorldName)
@@ -273,6 +278,10 @@ func (g *Game) startAllWorld() error {
 		if g.worldUpStatus(world.ID) {
 			logger.Logger.Infof("当前世界正在运行中，跳过，世界ID：%d", world.ID)
 			continue
+		}
+
+		if world.startCmdErr != nil {
+			return world.startCmdErr
 		}
 
 		logger.Logger.Debug(world.startCmd)
