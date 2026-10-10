@@ -6,6 +6,7 @@ import (
 	"dst-management-platform-api/cache"
 	"dst-management-platform-api/database/dao"
 	"dst-management-platform-api/database/models"
+	"dst-management-platform-api/internal/runner"
 	"dst-management-platform-api/logger"
 	"dst-management-platform-api/utils"
 	"fmt"
@@ -445,7 +446,16 @@ func installTMIR(string) ([]models.DstImage, error) {
 		fmt.Sprintf("%d", tmirID),
 		"+quit",
 	}
-	cmd := exec.Command("steamcmd/steamcmd.sh", cmdArgs...)
+	spec, err := runner.BuildSteamCMDCommand("steamcmd/steamcmd.sh", cmdArgs, runner.DefaultSteamCMDConfig())
+	if err != nil {
+		_ = utils.RemoveDir(modDir)
+		logger.Logger.Errorf("构建TMIR下载命令失败: %v", err)
+		return images, fmt.Errorf("构建TMIR下载命令失败: %v", err)
+	}
+	cmd := exec.Command(spec.Binary, spec.Args...)
+	if env := runner.Environ(spec); env != nil {
+		cmd.Env = env
+	}
 	if _, err := cmd.CombinedOutput(); err != nil {
 		_ = utils.RemoveDir(modDir)
 		logger.Logger.Errorf("下载TMIR模组失败: %v", err)

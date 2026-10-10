@@ -2,10 +2,12 @@ package dst
 
 import (
 	"dst-management-platform-api/cache"
+	"dst-management-platform-api/internal/runner"
 	"dst-management-platform-api/logger"
 	"dst-management-platform-api/utils"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -103,7 +105,11 @@ func (g *Game) downloadMod(id int, fileURL string) (error, int64) {
 
 		// 1
 		logger.Logger.Debugf("正在下载模组：%d", id)
-		downloadCmd := g.generateModDownloadCmd(id)
+		downloadCmd, err := g.generateModDownloadCmd(id)
+		if err != nil {
+			logger.Logger.Errorf("构建模组下载命令失败, err: %v", err)
+			return err, modSize
+		}
 		logger.Logger.Debug(downloadCmd)
 		err = utils.BashCMD(downloadCmd)
 		if err != nil {
@@ -173,8 +179,22 @@ func (g *Game) downloadMod(id int, fileURL string) (error, int64) {
 	return nil, modSize
 }
 
-func (g *Game) generateModDownloadCmd(id int) string {
-	return fmt.Sprintf("steamcmd/steamcmd.sh +force_install_dir %s/%s/mods/ugc/%s +login anonymous +workshop_download_item 322330 %d +quit", cache.CurrentDir, utils.DmpFiles, g.clusterName, id)
+func (g *Game) generateModDownloadCmd(id int) (string, error) {
+	installDir := filepath.Join(cache.CurrentDir, utils.DmpFiles, "mods", "ugc", g.clusterName)
+	spec, err := runner.BuildSteamCMDCommand("steamcmd/steamcmd.sh", []string{
+		"+force_install_dir",
+		installDir,
+		"+login",
+		"anonymous",
+		"+workshop_download_item",
+		"322330",
+		strconv.Itoa(id),
+		"+quit",
+	}, runner.DefaultSteamCMDConfig())
+	if err != nil {
+		return "", err
+	}
+	return runner.ShellRender(spec), nil
 }
 
 // ugcDownloadBytes 返回 SteamCMD 下载目录中模组当前占用的字节数。

@@ -108,8 +108,12 @@ func (h *Handler) execGamePost(c *gin.Context) {
 
 		go func() {
 			cache.DstUpdating = true
-			updateCmd := fmt.Sprintf("cd ~/steamcmd && ./steamcmd.sh +login anonymous +force_install_dir ~/dst +app_update 343050 validate +quit")
-			_ = utils.BashCMD(updateCmd)
+			updateCmd, err := dst.BuildGameUpdateShellCmd()
+			if err != nil {
+				logger.Logger.Errorf("构建游戏更新命令失败: %v", err)
+			} else {
+				_ = utils.BashCMD(updateCmd)
+			}
 			cache.DstUpdating = false
 
 			// 如果需要重启，则重启激活的房间

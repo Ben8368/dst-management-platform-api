@@ -193,8 +193,12 @@ func GameUpdate(enable bool, restart bool) {
 
 		cache.DstUpdating = true
 
-		updateCmd := fmt.Sprintf("cd ~/steamcmd && ./steamcmd.sh +login anonymous +force_install_dir ~/dst +app_update 343050 validate +quit")
-		_ = utils.BashCMD(updateCmd)
+		updateCmd, err := dst.BuildGameUpdateShellCmd()
+		if err != nil {
+			logger.Logger.Errorf("[定时任务]：构建游戏更新命令失败, err: %v", err)
+		} else {
+			_ = utils.BashCMD(updateCmd)
+		}
 
 		logger.Logger.Info("[定时任务]：游戏更新结束")
 
