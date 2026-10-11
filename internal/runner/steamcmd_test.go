@@ -152,12 +152,22 @@ func TestSteamCMD_ARM64_Box32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if spec.Binary != "steamcmd/steamcmd.sh" {
-		t.Errorf("expected steamcmd.sh binary, got %s", spec.Binary)
+	if spec.Binary != "/bin/sh" {
+		t.Fatalf("expected managed shell runner, got %s", spec.Binary)
 	}
-	dbg, ok := debuggerFromEnv(spec.Env)
-	if !ok || dbg != fakeBox64 {
-		t.Errorf("expected DEBUGGER=%s, got %v (%v)", fakeBox64, dbg, spec.Env)
+	if len(spec.Env) != 0 {
+		t.Errorf("Box32 runner must inherit environment without setting DEBUGGER, got %v", spec.Env)
+	}
+	if len(spec.Args) < 7 || spec.Args[0] != "-c" || spec.Args[1] != box32SteamCMDScript {
+		t.Fatalf("unexpected managed runner args: %#v", spec.Args)
+	}
+	if spec.Args[2] != "dmp-steamcmd-box32" || spec.Args[3] != "steamcmd/linux32" ||
+		spec.Args[4] != fakeBox64 || spec.Args[5] != "steamcmd/linux32/steamcmd" ||
+		spec.Args[6] != "3" {
+		t.Errorf("unexpected Box32 positional parameters: %#v", spec.Args[2:7])
+	}
+	if got := spec.Args[7:]; len(got) != 1 || got[0] != "+quit" {
+		t.Errorf("original SteamCMD args were not preserved: %#v", got)
 	}
 }
 
@@ -298,7 +308,7 @@ func TestSteamCMD_DebuggerNotInArgs(t *testing.T) {
 	}
 }
 
-func TestSteamCMD_SelfUpdatePreservesDebugger(t *testing.T) {
+func TestSteamCMD_Box86SelfUpdatePreservesDebugger(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX exec self-restart test requires Unix")
 	}
@@ -339,4 +349,181 @@ exit 0
 	if !strings.Contains(string(out), "DEBUGGER=/usr/bin/box86") {
 		t.Errorf("expected DEBUGGER to survive exec restart, got: %s", out)
 	}
+}
+
+func TestSteamCMD_Box32PathDerivation(t *testing.T) {
+	tests := []struct {
+		script string
+		want   string
+	}{
+		{script: "./steamcmd.sh", want: "linux32/steamcmd"},
+		{script: "steamcmd/steamcmd.sh", want: "steamcmd/linux32/steamcmd"},
+		{script: "/tmp/example/steamcmd.sh", want: "/tmp/example/linux32/steamcmd"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.script, func(t *testing.T) {
+			if got := steamCMDLinux32Path(tt.script); got != tt.want {
+				t.Errorf("steamCMDLinux32Path(%q) = %q, want %q", tt.script, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSteamCMD_Box32ShellRenderPreservesArgsAndEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell runner test requires Unix")
+	}
+	clearSteamCMDEnv(t)
+
+	dir := t.TempDir()
+	box64 := writeSteamCMDTestExecutable(t, filepath.Join(dir, "fake-box64"), "#!/bin/sh\nexec \"$@\"\n")
+	statePath := filepath.Join(dir, "state")
+	argsPath := filepath.Join(dir, "args")
+	steamRoot := filepath.Join(dir, "steamcmd")
+	writeSteamCMDTestExecutable(t, filepath.Join(steamRoot, "linux32", "steamcmd"), `#!/bin/sh
+count=0
+if [ -f "$STATE_PATH" ]; then count=$(cat "$STATE_PATH"); fi
+count=$((count + 1))
+printf '%s' "$count" > "$STATE_PATH"
+printf '%s\n' "$@" >> "$ARGS_PATH"
+printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH" >> "$ARGS_PATH"
+if [ "$count" -eq 1 ]; then exit 42; fi
+exit 0
+`)
+
+	installDir := "/root/DST Server/a'b$;`"
+	originalArgs := []string{"+force_install_dir", installDir, "+custom", "space value", "single'quote", "$HOME", ";", "`id`", "+quit"}
+	spec, err := BuildSteamCMDCommand(filepath.Join(steamRoot, "steamcmd.sh"), originalArgs, SteamCMDConfig{
+		HostOS:    "linux",
+		HostArch:  "arm64",
+		Mode:      SteamCompatBox32,
+		Box64Path: box64,
+	})
+	if err != nil {
+		t.Fatalf("build Box32 command: %v", err)
+	}
+	rendered := ShellRender(spec)
+	if strings.Contains(spec.Args[1], installDir) {
+		t.Fatal("dynamic SteamCMD argument was interpolated into the constant shell script")
+	}
+	if !strings.Contains(rendered, "'"+box32SteamCMDScript+"'") {
+		t.Fatalf("rendered command does not quote the constant runner script: %s", rendered)
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", rendered)
+	cmd.Env = MergeEnv(os.Environ(), map[string]string{
+		"ARGS_PATH":       argsPath,
+		"STATE_PATH":      statePath,
+		"LD_LIBRARY_PATH": "/existing/libs",
+	})
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute rendered Box32 command: %v, output=%s", err, output)
+	}
+
+	gotLines, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read guest argv log: %v", err)
+	}
+	wantLines := make([]string, 0, len(originalArgs)*2+2)
+	wantLines = append(wantLines, originalArgs...)
+	libDir := filepath.Join(steamRoot, "linux32")
+	wantLines = append(wantLines, "LD_LIBRARY_PATH="+libDir+":/existing/libs")
+	wantLines = append(wantLines, originalArgs...)
+	wantLines = append(wantLines, "LD_LIBRARY_PATH="+libDir+":/existing/libs")
+	if got := strings.Split(strings.TrimSuffix(string(gotLines), "\n"), "\n"); !equalStrings(got, wantLines) {
+		t.Fatalf("guest argv/environment mismatch\n got: %#v\nwant: %#v", got, wantLines)
+	}
+	if got, err := os.ReadFile(statePath); err != nil || strings.TrimSpace(string(got)) != "2" {
+		t.Fatalf("expected two guest launches, state=%q err=%v", got, err)
+	}
+}
+
+func TestSteamCMD_Box32RestartLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell runner test requires Unix")
+	}
+	clearSteamCMDEnv(t)
+	dir := t.TempDir()
+	box64 := writeSteamCMDTestExecutable(t, filepath.Join(dir, "fake-box64"), "#!/bin/sh\nexec \"$@\"\n")
+	statePath := filepath.Join(dir, "state")
+	steamRoot := filepath.Join(dir, "steamcmd")
+	writeSteamCMDTestExecutable(t, filepath.Join(steamRoot, "linux32", "steamcmd"), `#!/bin/sh
+count=0
+if [ -f "$STATE_PATH" ]; then count=$(cat "$STATE_PATH"); fi
+count=$((count + 1))
+printf '%s' "$count" > "$STATE_PATH"
+exit 42
+`)
+	spec, err := BuildSteamCMDCommand(filepath.Join(steamRoot, "steamcmd.sh"), nil, SteamCMDConfig{
+		HostOS: "linux", HostArch: "arm64", Mode: SteamCompatBox32, Box64Path: box64,
+	})
+	if err != nil {
+		t.Fatalf("build Box32 command: %v", err)
+	}
+	cmd := exec.Command(spec.Binary, spec.Args...)
+	cmd.Env = MergeEnv(os.Environ(), map[string]string{"STATE_PATH": statePath})
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected final exit 42 after restart limit")
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 42 {
+		t.Fatalf("expected exit 42, got err=%v output=%s", err, output)
+	}
+	if !strings.Contains(string(output), "restart limit") {
+		t.Errorf("expected restart limit message, output=%s", output)
+	}
+	if got, readErr := os.ReadFile(statePath); readErr != nil || strings.TrimSpace(string(got)) != "3" {
+		t.Fatalf("expected 3 guest launches before limit, state=%q err=%v", got, readErr)
+	}
+}
+
+func TestSteamCMD_Box32PropagatesExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell runner test requires Unix")
+	}
+	clearSteamCMDEnv(t)
+	dir := t.TempDir()
+	box64 := writeSteamCMDTestExecutable(t, filepath.Join(dir, "fake-box64"), "#!/bin/sh\nexec \"$@\"\n")
+	steamRoot := filepath.Join(dir, "steamcmd")
+	writeSteamCMDTestExecutable(t, filepath.Join(steamRoot, "linux32", "steamcmd"), "#!/bin/sh\nexit 17\n")
+	spec, err := BuildSteamCMDCommand(filepath.Join(steamRoot, "steamcmd.sh"), []string{"+quit"}, SteamCMDConfig{
+		HostOS: "linux", HostArch: "arm64", Mode: SteamCompatBox32, Box64Path: box64,
+	})
+	if err != nil {
+		t.Fatalf("build Box32 command: %v", err)
+	}
+	cmd := exec.Command(spec.Binary, spec.Args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected guest exit code 17")
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 17 {
+		t.Fatalf("expected exit 17, got err=%v output=%s", err, output)
+	}
+}
+
+func writeSteamCMDTestExecutable(t *testing.T, path, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("create executable directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	return path
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }

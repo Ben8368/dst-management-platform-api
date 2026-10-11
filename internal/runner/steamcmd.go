@@ -3,10 +3,11 @@ package runner
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
-// SteamCompatMode selects how SteamCMD's i386 binary is launched via DEBUGGER.
+// SteamCompatMode selects how SteamCMD's i386 binary is launched.
 type SteamCompatMode string
 
 const (
@@ -17,6 +18,28 @@ const (
 )
 
 const steamCMDCompatEnv = "DMP_STEAMCMD_COMPAT"
+
+const steamCMDMaxRestarts = 3
+
+const box32SteamCMDScript = `steam_lib_dir=$1
+box64=$2
+steamcmd=$3
+max_restarts=$4
+shift 4
+export LD_LIBRARY_PATH="$steam_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+restart_count=0
+while :; do
+	"$box64" "$steamcmd" "$@"
+	rc=$?
+	if [ "$rc" -ne 42 ]; then
+		exit "$rc"
+	fi
+	restart_count=$((restart_count + 1))
+	if [ "$restart_count" -ge "$max_restarts" ]; then
+		echo "SteamCMD Box32 restart limit reached after $restart_count restart requests" >&2
+		exit 42
+	fi
+done`
 
 // SteamCMDConfig configures SteamCMD compatibility resolution.
 // Box64Path / Box86Path reuse the same override semantics as Config
@@ -47,17 +70,9 @@ func (c SteamCMDConfig) toRunnerConfig() Config {
 	}
 }
 
-// BuildSteamCMDCommand builds a CommandSpec that executes the official steamcmd.sh.
-// Compatibility is applied via the DEBUGGER environment variable (consumed by
-// steamcmd.sh when launching linux32/steamcmd), not by wrapping the script with
-// box86/box64.
-//
-// SteamCMD self-restart preserves DEBUGGER because steamcmd.sh execs itself
-// within the same inherited process environment:
-//
-//	if [ $STATUS -eq $MAGIC_RESTART_EXITCODE ]; then
-//	    exec "$0" "$@"
-//	fi
+// BuildSteamCMDCommand builds a CommandSpec for the selected SteamCMD backend.
+// Native and Box86 modes execute steamcmd.sh; Box32 directly runs the linux32
+// binary and handles SteamCMD's exit-42 self-update restart outside the script.
 func BuildSteamCMDCommand(script string, args []string, config SteamCMDConfig) (CommandSpec, error) {
 	if script == "" {
 		return CommandSpec{}, fmt.Errorf("steamcmd script path must not be empty")
@@ -113,15 +128,31 @@ func BuildSteamCMDCommand(script string, args []string, config SteamCMDConfig) (
 			return CommandSpec{}, fmt.Errorf(
 				"SteamCMD box32 mode requires Box64 with Box32 support enabled: %w", err)
 		}
-		env, err := envMapToSlice(map[string]string{"DEBUGGER": box64Path})
-		if err != nil {
-			return CommandSpec{}, err
+		steamcmdPath := steamCMDLinux32Path(script)
+		steamLibDir := filepath.Dir(steamcmdPath)
+		box32Args := make([]string, 0, 7+len(argsCopy))
+		box32Args = append(box32Args,
+			"-c",
+			box32SteamCMDScript,
+			"dmp-steamcmd-box32",
+			steamLibDir,
+			box64Path,
+			steamcmdPath,
+			fmt.Sprint(steamCMDMaxRestarts),
+		)
+		box32Args = append(box32Args, argsCopy...)
+		spec = CommandSpec{
+			Binary: "/bin/sh",
+			Args:   box32Args,
 		}
-		spec.Env = env
 		return spec, nil
 	}
 
 	return CommandSpec{}, fmt.Errorf("unsupported SteamCMD compatibility mode: %s", effective)
+}
+
+func steamCMDLinux32Path(script string) string {
+	return filepath.Clean(filepath.Join(filepath.Dir(script), "linux32", "steamcmd"))
 }
 
 func resolveSteamCompatMode(config SteamCMDConfig) (SteamCompatMode, error) {

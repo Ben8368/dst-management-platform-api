@@ -19,19 +19,23 @@ func BuildGameUpdateShellCmd() (string, error) {
 	steamDir := filepath.Join(home, "steamcmd")
 	dstDir := filepath.Join(home, "dst")
 
-	spec, err := runner.BuildSteamCMDCommand("./steamcmd.sh", []string{
-		"+login",
-		"anonymous",
-		"+force_install_dir",
-		dstDir,
-		"+app_update",
-		"343050",
-		"validate",
-		"+quit",
-	}, runner.DefaultSteamCMDConfig())
+	spec, err := runner.BuildSteamCMDCommand("./steamcmd.sh", gameUpdateSteamCMDArgs(dstDir), runner.DefaultSteamCMDConfig())
 	if err != nil {
 		return "", err
 	}
 
 	return "cd " + utils.ShellQuote(steamDir) + " && " + runner.ShellRender(spec), nil
+}
+
+func gameUpdateSteamCMDArgs(dstDir string) []string {
+	return []string{
+		"+force_install_dir",
+		dstDir,
+		"+login",
+		"anonymous",
+		"+app_update",
+		"343050",
+		"validate",
+		"+quit",
+	}
 }

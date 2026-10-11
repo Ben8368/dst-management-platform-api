@@ -18,21 +18,76 @@ cleanup() {
 }
 
 install_steamcmd() {
-    wget https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
-	mkdir -p "$STEAM_DIR"
-	tar -zxvf steamcmd_linux.tar.gz -C "$STEAM_DIR"
+	if [ ! -x "$STEAM_DIR/steamcmd.sh" ] || [ ! -x "$STEAM_DIR/linux32/steamcmd" ]; then
+		local staging
+		staging="$(mktemp -d)" || return 1
+		if ! wget -q https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz -O "$staging/steamcmd.tar.gz"; then
+			rm -rf "$staging"
+			return 1
+		fi
+		# 先在临时目录解压并检查，避免失败下载留下看似可用的安装。
+		if ! tar -zxf "$staging/steamcmd.tar.gz" -C "$staging" ||
+			[ ! -x "$staging/steamcmd.sh" ] || [ ! -x "$staging/linux32/steamcmd" ]; then
+			rm -rf "$staging"
+			return 1
+		fi
+		if ! rm -f "$staging/steamcmd.tar.gz" || ! mkdir -p "$STEAM_DIR" || ! cp -a "$staging/." "$STEAM_DIR/"; then
+			rm -rf "$staging"
+			return 1
+		fi
+		rm -rf "$staging"
+	fi
 }
 
 link_so() {
-	[ ! -L "dst/bin64/lib64/libcurl-gnutls.so.4" ] && ln -s /usr/lib/x86_64-linux-gnu/libcurl-gnutls.so.4 dst/bin64/lib64/libcurl-gnutls.so.4
-	[ ! -L "dst/bin/lib32/libcurl-gnutls.so.4" ] && ln -s /usr/lib/i386-linux-gnu/libcurl-gnutls.so.4 dst/bin/lib32/libcurl-gnutls.so.4
+	local curl64 curl32
+	case "$(uname -m)" in
+		x86_64)
+			curl64="/usr/lib/x86_64-linux-gnu/libcurl-gnutls.so.4"
+			curl32="/usr/lib/i386-linux-gnu/libcurl-gnutls.so.4"
+			;;
+		aarch64|arm64)
+			curl64="/usr/lib/aarch64-linux-gnu/libcurl-gnutls.so.4"
+			curl32="/usr/lib/arm-linux-gnueabihf/libcurl-gnutls.so.4"
+			;;
+		*)
+			return 0
+			;;
+	esac
+	if [ -d "dst/bin64/lib64" ] && [ ! -e "dst/bin64/lib64/libcurl-gnutls.so.4" ] && [ ! -L "dst/bin64/lib64/libcurl-gnutls.so.4" ]; then
+		ln -s "$curl64" dst/bin64/lib64/libcurl-gnutls.so.4 || return 1
+	fi
+	if [ -d "dst/bin/lib32" ] && [ ! -e "dst/bin/lib32/libcurl-gnutls.so.4" ] && [ ! -L "dst/bin/lib32/libcurl-gnutls.so.4" ]; then
+		ln -s "$curl32" dst/bin/lib32/libcurl-gnutls.so.4 || return 1
+	fi
+}
+
+log_runtime() {
+	case "$(uname -m)" in
+		x86_64)
+			echo "Runtime architecture: amd64"
+			echo "DMP architecture: amd64"
+			echo "SteamCMD compatibility: ${DMP_STEAMCMD_COMPAT:-auto} (auto: native)"
+			;;
+		aarch64|arm64)
+			echo "Runtime architecture: arm64"
+			echo "DMP architecture: arm64"
+			echo "Box64: $("${DMP_BOX64_PATH:-box64}" --version 2>&1 | head -n 1)"
+			echo "Box86: $("${DMP_BOX86_PATH:-box86}" --version 2>&1 | head -n 1)"
+			echo "SteamCMD compatibility: ${DMP_STEAMCMD_COMPAT:-auto} (auto: box86)"
+			;;
+		*)
+			echo "Runtime architecture: $(uname -m)"
+			;;
+	esac
 }
 
 # 捕获 SIGTERM 信号
 trap cleanup SIGTERM
 
-install_steamcmd
-link_so
+log_runtime
+install_steamcmd || exit 1
+link_so || exit 1
 
 # 构建启动命令
 DMP_CMD="./dmp -bind $DMP_PORT -dbpath ./data -level ${LEVEL:-info}"

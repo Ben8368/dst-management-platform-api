@@ -1,0 +1,16 @@
+.git
+**/.git
+.gocache/
+**/.gocache/
+dist/
+data/
+logs/
+dmp_files/
+.klei/
+dmp
+.env
+.env.*
+credentials/
+credentials*
+*.pem
+*.key

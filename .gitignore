@@ -3,6 +3,8 @@
 !.claude/skills/
 deliverables
 dmp
+dist/
+.gocache/
 dmp_files
 data
 logs
