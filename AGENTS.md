@@ -65,7 +65,7 @@ go run . -bind 8080 -dbpath ./data -level debug
 
 启动服务会创建数据库、日志、`dmp_files/` 和手动安装脚本，并启动可能访问网络或操作 DST 进程的调度任务。不要把启动服务作为普通代码修改的默认验证步骤。
 
-可用启动参数包括 `-bind`、`-dbpath`、`-level`、`-cert`、`-key`、`-no-http-compress`、`-v` 和 `-console`。`-cert` 与 `-key` 同时提供时启动 HTTPS；`-level debug` 会注册 pprof 路由，不应在生产环境启用；`-console` 执行一次控制台命令后退出。
+可用启动参数包括 `-bind`、`-dbpath`、`-level`、`-cert`、`-key`、`-no-http-compress`、`-pprof`、`-v` 和 `-console`。`-cert` 与 `-key` 同时提供时启动 HTTPS；`-level debug` 仅控制日志等级，pprof 路由默认关闭，需通过 `-pprof` 单独启用，不应在生产环境开启 pprof；`-console` 执行一次控制台命令后退出。
 
 ## 修改规则
 
